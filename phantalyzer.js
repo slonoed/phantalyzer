@@ -260,7 +260,6 @@
 
     /* the goal of this script is to open the page and spit out as much crap as possible so that
      you can grep over it later and derive information from it. */
-    var Q = require('./libs/q/q');
     var S = require('./libs/string/lib/string');
     var U = require('./libs/underscore/index');
     var system = require('system');
@@ -289,8 +288,8 @@
     /* you can pass any of these parameters in and they will override the
      phantom defaults.  the format is --loadImages true */
     var phantomPageProperties = {
-        "javascriptEnabled": argMap.js,
-        "loadImages": argMap.images,
+        "javascriptEnabled": !!argMap.js,
+        "loadImages": !!argMap.images,
         "localToRemoteUrlAccessEnabled": true,
         "userAgent": true,
         "userName": true,
