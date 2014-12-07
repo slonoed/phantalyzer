@@ -1,248 +1,537 @@
 /**
  * Wappalyzer v2
  *
- * Created by Elbert F <info@elbertf.com>
+ * Created by Elbert Alias <elbert@alias.io>
  *
  * License: GPLv3 http://www.gnu.org/licenses/gpl-3.0.txt
  */
 
-var wappalyzer = wappalyzer || (function() {
-	//'use strict';
+var wappalyzer = (function () {
+    //'use strict';
 
-	/**
-	 * Call driver functions
-	 */
-	var driver = function(func, args) {
-		if ( typeof w.driver[func] !== 'function' ) {
-			w.log('not implemented: w.driver.' + func, 'warn');
+    /**
+     * Application class
+     */
+    var Application = function (app, detected) {
+        this.app = app;
+        this.confidence = {};
+        this.confidenceTotal = 0;
+        this.detected = Boolean(detected);
+        this.excludes = [];
+        this.version = '';
+        this.versions = [];
+    };
 
-			return;
-		}
+    Application.prototype = {
+        /**
+         * Calculate confidence total
+         */
+        getConfidence: function () {
+            var total = 0, id;
 
-		if ( func !== 'log' ) { w.log('w.driver.' + func); }
+            for (id in this.confidence) {
+                total += this.confidence[id];
+            }
 
-		return w.driver[func](args);
-	};
+            return this.confidenceTotal = Math.min(total, 100);
+        },
 
-	/**
-	 * Main script
-	 */
-	var w = {
-		// Cache detected applications per URL
-		history:  [],
-		detected: [],
+        /**
+         * Resolve version number (find the longest version number that contains all shorter detected version numbers)
+         */
+        getVersion: function () {
+            var i, resolved;
 
-		config: {
-			environment: 'dev', // dev | live
+            if (!this.versions.length) {
+                return;
+            }
 
-			version: false,
+            this.versions.sort(function (a, b) {
+                return a.length - b.length;
+            });
 
-			websiteURL: 'http://wappalyzer.com/',
-			twitterURL: 'https://twitter.com/Wappalyzer',
-			githubURL:  'https://github.com/ElbertF/Wappalyzer',
+            resolved = this.versions[0];
 
-			firstRun: false,
-			upgraded: false
-		},
+            for (i = 1; i < this.versions.length; i++) {
+                if (this.versions[i].indexOf(resolved) === -1) {
+                    break;
+                }
 
-		/**
-		 * Log messages to console
-		 */
-		log: function(message, type) {
-			if ( w.config.environment === 'dev' ) {
-				if ( type == null ) { type = 'debug'; }
+                resolved = this.versions[i];
+            }
 
-				driver('log', { message: '[wappalyzer ' + type + '] ' + message, type: type });
-			}
-		},
+            return this.version = resolved;
+        },
 
-		/**
-		 * Initialize
-		 */
-		init: function() {
-			w.log('w.init');
+        setDetected: function (pattern, type, value, key) {
+            this.detected = true;
 
-			// Checks
-			if ( w.driver == null ) {
-				w.log('no driver, exiting');
+            // Set confidence level
+            this.confidence[type + ' ' + ( key ? key + ' ' : '' ) + pattern.regex] = pattern.confidence ? pattern.confidence : 100;
 
-				return;
-			}
+            // Detect version number
+            if (pattern.version) {
+                var
+                    version = pattern.version,
+                    matches = pattern.regex.exec(value);
 
-			if ( w.apps == null || w.categories == null ) {
-				w.log('apps.js not loaded, exiting');
+                if (matches) {
+                    matches.forEach(function (match, i) {
+                        // Parse ternary operator
+                        var ternary = new RegExp('\\\\' + i + '\\?([^:]+):(.*)$').exec(version);
 
-				return;
-			}
+                        if (ternary && ternary.length === 3) {
+                            w.log({match: match, i: i, ternary: ternary});
 
-			// Initialize driver
-			driver('init', function() {
-				if ( w.config.firstRun ) {
-					driver('goToURL', { url: w.config.websiteURL + 'installed' });
+                            version = version.replace(ternary[0], match ? ternary[1] : ternary[2]);
 
-					w.config.firstRun = false;
-				}
+                            w.log({version: version});
+                        }
 
-				if ( w.config.upgraded ) {
-					driver('goToURL', { url: w.config.websiteURL + 'upgraded'  });
+                        // Replace back references
+                        version = version.replace('\\' + i, match ? match : '');
+                    });
 
-					w.config.upgraded = false;
-				}
-			});
-		},
+                    if (version && this.versions.indexOf(version) < 0) {
+                        this.versions.push(version);
+                    }
 
-		/**
-		 * Analyze the request
-		 */
-		analyze: function(hostname, url, data) {
-			w.log('w.analyze');
+                    this.getVersion();
+                }
+            }
+        }
+    };
 
-			var i, app, type, regex, match, content, meta, header, apps = [];
+    var Profiler = function () {
+        this.regexCount = 0;
+        this.startTime = new Date().getTime();
+        this.lastTime = new Date().getTime();
+        this.slowest = {duration: null, app: '', type: '', pattern: ''};
+        this.timedOut = false;
+    };
 
-			if ( w.history[hostname] == null ) { w.history[hostname] = []; }
-			if ( w.detected[url]     == null ) { w.detected[url]     = []; }
+    Profiler.prototype = {
+        checkPoint: function (app, type, regex) {
+            var duration = new Date().getTime() - this.lastTime;
 
-			if ( data ) {
-				for ( app in w.apps ) {
-					for ( type in w.apps[app] ) {
-						if ( w.detected[url].indexOf(app) !== -1 || apps.indexOf(app) !== -1 ) { continue; } // Skip if the app has already been detected
+            if (!this.slowest.duration || duration > this.slowest.duration) {
+                this.slowest.duration = duration;
+                this.slowest.app = app;
+                this.slowest.type = type;
+                this.slowest.regex = regex;
+            }
 
-						switch ( type ) {
-							case 'url':
-								if ( w.apps[app].url.test(url) ) { apps.push(app); }
+            this.regexCount++;
 
-								break;
-							case 'html':
-								if ( data[type] == null ) { break; }
+            this.lastTime = new Date().getTime();
 
-								if ( w.apps[app][type].test(data[type]) ) { apps.push(app); }
+            this.timedOut = this.lastTime - this.startTime > 1000;
+        }
+    };
 
-								break;
-							case 'script':
-								if ( data['html'] == null ) { break; }
+    /**
+     * Call driver functions
+     */
+    var driver = function (func, args) {
+        if (typeof w.driver[func] !== 'function') {
+            w.log('not implemented: w.driver.' + func, 'warn');
 
-								regex = /<script[^>]+src=("|')([^"']+)\1/ig;
+            return;
+        }
 
-								while ( match = regex.exec(data['html']) ) {
-									if ( w.apps[app][type].test(match[2]) ) {
-										apps.push(app);
+        if (func !== 'log') {
+            w.log('w.driver.' + func);
+        }
 
-										break;
-									}
-								}
+        return w.driver[func](args);
+    };
 
-								break;
-							case 'meta':
-								if ( data['html'] == null ) { break; }
+    /**
+     * Parse apps.json patterns
+     */
+    var parse = function (patterns) {
+        var
+            attrs,
+            parsed = [];
 
-								regex = /<meta[^>]+>/ig;
+        // Convert single patterns to an array
+        if (typeof patterns === 'string') {
+            patterns = [patterns];
+        }
 
-								while ( match = regex.exec(data['html']) ) {
-									for ( meta in w.apps[app][type] ) {
-										if ( new RegExp('name=["\']' + meta + '["\']', 'i').test(match) ) {
-											content = match.toString().match(/content=("|')([^"']+)("|')/i);
+        patterns.forEach(function (pattern) {
+            attrs = {};
 
-											if ( content && w.apps[app].meta[meta].test(content[2]) ) {
-												apps.push(app);
+            pattern.split('\\;').forEach(function (attr, i) {
+                if (i) {
+                    // Key value pairs
+                    attr = attr.split(':');
 
-												break;
-											}
-										}
-									}
-								}
+                    if (attr.length > 1) {
+                        attrs[attr.shift()] = attr.join(':');
+                    }
+                } else {
+                    attrs.string = attr;
 
-								break;
-							case 'headers':
-								if ( data[type] == null ) { break; }
+                    try {
+                        attrs.regex = new RegExp(attr.replace('/', '\/'), 'i'); // Escape slashes in regular expression
+                    } catch (e) {
+                        attrs.regex = new RegExp();
 
-								for ( header in w.apps[app].headers ) {
-									if ( data[type][header] != null && w.apps[app][type][header].test(data[type][header]) ) {
-										apps.push(app);
+                        w.log(e + ': ' + attr, 'error');
+                    }
+                }
+            });
 
-										break;
-									}
-								}
+            parsed.push(attrs);
+        });
 
-								break;
-							case 'env':
-								if ( data[type] == null ) { break; }
+        return parsed;
+    };
 
-								for ( i in data[type] ) {
-									if ( w.apps[app][type].test(data[type][i]) ) {
-										apps.push(app);
+    /**
+     * Main script
+     */
+    var w = {
+        apps: {},
+        cats: null,
+        ping: {hostnames: {}},
+        detected: {},
 
-										break;
-									}
-								}
+        config: {
+            websiteURL: 'https://wappalyzer.com/',
+            twitterURL: 'https://twitter.com/Wappalyzer',
+            githubURL: 'https://github.com/ElbertF/Wappalyzer'
+        },
 
-								break;
-						}
-					}
-				}
+        /**
+         * Log messages to console
+         */
+        log: function (message, type) {
 
-				// Implied applications
-				var i, j, k, implied;
+            if (type === undefined) {
+                type = 'debug';
+            }
 
-				for ( i = 0; i < 3; i ++ ) {
-					for ( j in apps ) {
-					  //if (apps.hasOwnProperty(j)) {//MLC
-					    if ( w.apps[apps[j]] && w.apps[apps[j]].implies ) {
-							for ( k in w.apps[apps[j]].implies ) {
-                                                          if ( w.apps[apps[j]].implies.hasOwnProperty(k) ) {//MLC
-								implied = w.apps[apps[j]].implies[k];
+            if (typeof message === 'object') {
+                message = JSON.stringify(message);
+            }
 
-								if ( !w.apps[implied] ) {
-									w.log('Implied application ' + implied + ' does not exist');
+            driver('log', {message: '[wappalyzer ' + type + '] ' + message, type: type});
+        },
 
-									continue;
-								}
+        /**
+         * Initialize
+         */
+        init: function () {
+            w.log('w.init');
 
-								if ( w.detected[url].indexOf(implied) === -1 && apps.indexOf(implied) === -1 ) {
-									apps.push(implied);
-								}
-							}
-                                                      }
-						}
-					//}
-                                  }
-				}
+            // Checks
+            if (w.driver === undefined) {
+                w.log('no driver, exiting');
 
-				w.log(apps.length + ' apps detected: ' + apps.join(', ') + ' in ' + url);
+                return;
+            }
 
-				// Keep history of detected apps
-				var i, app;
+            // Initialize driver
+            driver('init');
+        },
 
-				for ( i in apps ) {
-					app = apps[i];
+        /**
+         * Analyze the request
+         */
+        analyze: function (hostname, url, data) {
+            var
+                i, j, app, confidence, type, regexMeta, regexScript, match, content, meta, header, version, id,
+                profiler = new Profiler(),
+                apps = {},
+                excludes = [],
+                checkImplies = true;
 
-					if ( /^[a-z0-9._\-]+\.[a-z]+/.test(hostname) && !/(dev\.|\/admin|\.local)/.test(url) ) {
-						// Per hostname
-						var index = -1;
 
-						w.history[hostname].map(function(data, i) {
-							if ( data.app === app ) { index = i; }
-						});
+            // Remove hash from URL
+            data.url = url = url.split('#')[0];
 
-						if ( index === -1 ) {
-							w.history[hostname].push({ app: app, hits: 1 });
-						} else {
-							w.history[hostname][index].hits ++;
-						}
+            if (w.apps === undefined) {
+                w.log('apps.json not loaded, check for syntax errors');
 
-						if ( Object.keys(w.history).length >= 200 ) { driver('track'); }
-					}
+                return;
+            }
 
-					// Per URL
-					if ( w.detected[url].indexOf(app) === -1 ) { w.detected[url].push(app); }
-				};
+            if (w.detected[url] === undefined) {
+                w.detected[url] = {};
+            }
 
-				apps = null;
-				data = null;
-			}
+            for (app in w.apps) {
+                // Exit loop after one second to prevent CPU hogging
+                // Remaining patterns will not be evaluated
+                if (profiler.timedOut) {
+                    w.log('Timeout, exiting loop');
 
-			driver('displayApps');
-		}
-	};
+                    break;
+                }
 
-	return w;
+                apps[app] = w.detected[url] && w.detected[url][app] ? w.detected[url][app] : new Application(app);
+
+                for (type in w.apps[app]) {
+                    switch (type) {
+                        case 'url':
+                            parse(w.apps[app][type]).forEach(function (pattern) {
+                                if (pattern.regex.test(url)) {
+                                    apps[app].setDetected(pattern, type, url);
+                                }
+
+                                profiler.checkPoint(app, type, pattern.regex);
+                            });
+
+                            break;
+                        case 'html':
+                            if (typeof data[type] !== 'string' || !data.html) {
+                                break;
+                            }
+
+                            parse(w.apps[app][type]).forEach(function (pattern) {
+                                if (pattern.regex.test(data[type])) {
+                                    apps[app].setDetected(pattern, type, data[type]);
+                                }
+
+                                profiler.checkPoint(app, type, pattern.regex);
+                            });
+
+                            break;
+                        case 'script':
+                            if (typeof data.html !== 'string' || !data.html) {
+                                break;
+                            }
+
+                            regexScript = new RegExp('<script[^>]+src=("|\')([^"\']+)', 'ig');
+
+                            parse(w.apps[app][type]).forEach(function (pattern) {
+                                while (match = regexScript.exec(data.html)) {
+                                    if (pattern.regex.test(match[2])) {
+                                        apps[app].setDetected(pattern, type, match[2]);
+                                    }
+                                }
+
+                                profiler.checkPoint(app, type, pattern.regex);
+                            });
+
+                            break;
+                        case 'meta':
+                            if (typeof data.html !== 'string' || !data.html) {
+                                break;
+                            }
+
+                            regexMeta = /<meta[^>]+>/ig;
+
+                            while (match = regexMeta.exec(data.html)) {
+                                for (meta in w.apps[app][type]) {
+                                    profiler.checkPoint(app, type, regexMeta);
+
+                                    if (new RegExp('name=["\']' + meta + '["\']', 'i').test(match)) {
+                                        content = match.toString().match(/content=("|')([^"']+)("|')/i);
+
+                                        parse(w.apps[app].meta[meta]).forEach(function (pattern) {
+                                            if (content && content.length === 4 && pattern.regex.test(content[2])) {
+                                                apps[app].setDetected(pattern, type, content[2], meta);
+                                            }
+
+                                            profiler.checkPoint(app, type, pattern.regex);
+                                        });
+                                    }
+                                }
+                            }
+
+                            break;
+                        case 'headers':
+                            var pageHeaders = data.headers,
+                                detectHeadersConfig = w.apps[app].headers;
+
+
+                            if (typeof pageHeaders !== 'object' || !pageHeaders) {
+                                break;
+                            }
+
+                            Object.keys(detectHeadersConfig).forEach(function (testHeaderName) {
+                                parse(detectHeadersConfig[testHeaderName]).forEach(function (pattern) {
+                                    var pageHasThisHeader = typeof pageHeaders[testHeaderName] === 'string';
+
+                                    if (pageHasThisHeader && pattern.regex.test(pageHeaders[testHeaderName])) {
+                                        apps[app].setDetected(pattern, type, pageHeaders[testHeaderName], testHeaderName);
+                                    }
+
+                                    profiler.checkPoint(app, type, pattern.regex);
+                                });
+                            });
+
+                            break;
+                        case 'env':
+                            if (typeof data[type] !== 'object' || !data[type]) {
+                                break;
+                            }
+
+                            parse(w.apps[app][type]).forEach(function (pattern) {
+                                for (i in data[type]) {
+
+                                    if (pattern.regex.test(data[type][i])) {
+                                        apps[app].setDetected(pattern, type, data[type][i]);
+                                    }
+                                }
+
+                                profiler.checkPoint(app, type, pattern.regex);
+                            });
+
+                            break;
+                    }
+                }
+            }
+
+            w.log('[ profiler ] Tested ' + profiler.regexCount + ' regular expressions in ' + ( (new Date().getTime() - profiler.startTime) / 1000 ) + 's');
+            w.log('[ profiler ] Slowest pattern took ' + ( profiler.slowest.duration / 1000 ) + 's: ' + profiler.slowest.app + ' | ' + profiler.slowest.type + ' | ' + profiler.slowest.regex);
+
+            for (app in apps) {
+                if (!apps[app].detected) {
+                    delete apps[app];
+                }
+            }
+
+            // Exclude app in detected apps only
+            for (app in apps) {
+                if (w.apps[app].excludes) {
+                    if (typeof w.apps[app].excludes === 'string') {
+                        w.apps[app].excludes = [w.apps[app].excludes];
+                    }
+
+                    w.apps[app].excludes.forEach(function (excluded) {
+                        excludes.push(excluded);
+                    });
+                }
+            }
+
+            // Remove excluded applications
+            for (app in apps) {
+                if (excludes.indexOf(app) !== -1) {
+                    delete apps[app];
+                }
+            }
+
+            // Implied applications
+            // Run several passes as implied apps may imply other apps
+            while (checkImplies) {
+                checkImplies = false;
+
+                for (app in apps) {
+                    confidence = apps[app].confidence;
+
+                    if (w.apps[app] && w.apps[app].implies) {
+                        // Cast strings to an array
+                        if (typeof w.apps[app].implies === 'string') {
+                            w.apps[app].implies = [w.apps[app].implies];
+                        }
+
+                        w.apps[app].implies.forEach(function (implied) {
+                            implied = parse(implied)[0];
+
+                            if (!w.apps[implied.string]) {
+                                w.log('Implied application ' + implied.string + ' does not exist', 'warn');
+
+                                return;
+                            }
+
+                            if (!apps.hasOwnProperty(implied.string)) {
+                                apps[implied.string] = w.detected[url] && w.detected[url][implied.string] ? w.detected[url][implied.string] : new Application(implied.string, true);
+
+                                checkImplies = true;
+                            }
+
+                            // Apply app confidence to implied app
+                            for (id in confidence) {
+                                apps[implied.string].confidence[id + ' implied by ' + app] = confidence[id] * ( implied.confidence ? implied.confidence / 100 : 1 );
+                            }
+                        });
+                    }
+                }
+            }
+
+            w.log(Object.keys(apps).length + ' apps detected: ' + Object.keys(apps).join(', ') + ' on ' + url);
+
+            // Keep history of detected apps
+            for (app in apps) {
+                confidence = apps[app].confidence;
+                version = apps[app].version;
+
+                // Per URL
+                w.detected[url][app] = apps[app];
+
+                for (id in confidence) {
+                    w.detected[url][app].confidence[id] = confidence[id];
+                }
+
+                if (w.detected[url][app].getConfidence() >= 100) {
+                    // Per hostname
+                    if (/(www.)?((.+?)\.(([a-z]{2,3}\.)?[a-z]{2,6}))$/.test(hostname) && !/((local|dev(elopment)?|stag(e|ing)?|test(ing)?|demo(shop)?|admin|google|cache)\.|\/admin|\.local)/.test(url)) {
+                        if (!w.ping.hostnames.hasOwnProperty(hostname)) {
+                            w.ping.hostnames[hostname] = {applications: {}, meta: {}};
+                        }
+
+                        if (!w.ping.hostnames[hostname].applications.hasOwnProperty(app)) {
+                            w.ping.hostnames[hostname].applications[app] = {hits: 0};
+                        }
+
+                        w.ping.hostnames[hostname].applications[app].hits++;
+
+                        if (version) {
+                            w.ping.hostnames[hostname].applications[app].version = version;
+                        }
+                    } else {
+                        w.log('Ignoring hostname "' + hostname + '"');
+                    }
+                }
+            }
+
+            // Additional information
+            if (w.ping.hostnames.hasOwnProperty(hostname)) {
+                if (typeof data.html === 'string' && data.html) {
+                    match = data.html.match(/<html[^>]*[: ]lang="([a-z]{2}((-|_)[A-Z]{2})?)"/i);
+
+                    if (match && match.length) {
+                        w.ping.hostnames[hostname].meta['language'] = match[1];
+                    }
+
+                    regexMeta = /<meta[^>]+>/ig;
+
+                    while (match = regexMeta.exec(data.html)) {
+                        if (!match.length) {
+                            continue;
+                        }
+
+                        match = match[0].match(/name="(author|copyright|country|description|keywords)"[^>]*content="([^"]+)"/i);
+
+                        if (match && match.length === 3) {
+                            w.ping.hostnames[hostname].meta[match[1]] = match[2];
+                        }
+                    }
+                }
+
+                //w.log({ hostname: hostname, ping: w.ping.hostnames[hostname] });
+            }
+
+            if (Object.keys(w.ping.hostnames).length >= 20) {
+                driver('ping');
+            }
+
+            apps = null;
+            data = null;
+
+            driver('displayApps');
+        }
+    };
+
+    return w;
 })();
+
+// CommonJS package
+// See http://wiki.commonjs.org/wiki/CommonJS
+if (typeof exports === 'object') {
+    exports.wappalyzer = wappalyzer;
+}

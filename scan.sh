@@ -1,1 +1,1 @@
-phantomjs phantalyzer.js $@
+phantomjs go.js $@
